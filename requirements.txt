@@ -1,0 +1,7 @@
+numpy
+opencv-python
+scenedetect
+librosa
+faster-whisper
+pytesseract
+yt-dlp
