@@ -65,10 +65,12 @@ pip install -r requirements.txt
 # 1) Video listesi: linkler veya dosyalar, her satıra bir tane
 #    (başarılı ve kontrol videolarını birlikte koy)
 python measure.py linkler.txt -o cikti           # veya: python measure.py video.mp4 -o cikti
-#    -> cikti/<video>/measure.json, contact_sheet.jpg, transcript.txt
+#    -> cikti/<video>/measure.json, transcript.txt, kare setleri:
+#       hook_seridi.jpg (ilk 3 sn, 4 kare/sn), sahneler_N.jpg (her sahnenin başı/ortası/sonu),
+#       olay_anlari_N.jpg (tespit edilen olay anları), kare_dizini.json, contact_sheet.jpg
 
 # 2) Her video için ai_rubrik.md'deki promptu 3 kez bağımsız çalıştır
-#    (measure.json + contact_sheet.jpg + transcript.txt ekleyerek),
+#    (measure.json + kare setleri + kare_dizini.json + transcript.txt ekleyerek),
 #    çıktıları cikti/<video>/ai_1.json, ai_2.json, ai_3.json olarak kaydet
 python consensus.py cikti/<video>
 

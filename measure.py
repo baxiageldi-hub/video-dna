@@ -8,7 +8,11 @@ Kullanım:
 
 Çıktı (cikti/<video_adı>/):
   measure.json       -> tüm sayısal metrikler (her metrik 'olcum' veya 'yaklasik' etiketli)
-  contact_sheet.jpg  -> her sahneden bir kare + zaman kodu (AI yorumu için)
+  contact_sheet.jpg  -> her sahneden bir kare + zaman kodu (genel bakış)
+  hook_seridi.jpg    -> ilk 3 sn, saniyede 4 kare
+  sahneler_N.jpg     -> her sahnenin başı / ortası / sonu (görüntü başına 10 sahne)
+  olay_anlari_N.jpg  -> makinenin tespit ettiği olay anları (sahne içi olay, pattern interrupt, yeni yazı, kamera hareketi)
+  kare_dizini.json   -> hangi karenin hangi saniyeden ve neden alındığı
   transcript.txt     -> zaman kodlu transkript (AI yorumu için)
 """
 import argparse, json, os, re, subprocess, sys, math, collections, shutil
@@ -636,6 +640,88 @@ def derived(base, sc, mo, au_raw, sp, words, oc, vp):
 
 
 # ----------------------------------------------------------------- 10. AI için malzeme
+def _grab(cap, t, dur, tw):
+    t = min(max(0.0, t), max(0.0, dur - 0.05))
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    ok, fr = cap.read()
+    if not ok:
+        return None
+    return cv2.resize(fr, (tw, int(fr.shape[0] * tw / fr.shape[1])))
+
+
+def _label(fr, txt, color=(0, 0, 0)):
+    cv2.rectangle(fr, (0, 0), (fr.shape[1], 20), color, -1)
+    cv2.putText(fr, txt[:34], (3, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+    return fr
+
+
+def _grid(tiles, cols, outfn):
+    if not tiles:
+        return False
+    h, w = tiles[0].shape[:2]
+    tiles = [cv2.resize(x, (w, h)) for x in tiles]
+    while len(tiles) % cols:
+        tiles.append(np.zeros_like(tiles[0]))
+    rows = [np.hstack(tiles[i:i + cols]) for i in range(0, len(tiles), cols)]
+    cv2.imwrite(outfn, np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return True
+
+
+def key_frames(path, base, sc, mo, oc, de, od):
+    """AI katmanı için hedefli kare setleri: hook şeridi, sahne başı/ortası/sonu, olay anları."""
+    dur = base["sure_sn"]
+    cap = cv2.VideoCapture(path)
+    index = {"hook_seridi": [], "sahneler": [], "olay_anlari": []}
+    # 1) Hook şeridi: ilk 3 sn, saniyede 4 kare
+    tiles = []
+    for t in np.arange(0, min(3.0, dur), 0.25):
+        fr = _grab(cap, t, dur, 180)
+        if fr is not None:
+            tiles.append(_label(fr, tc(t), (30, 30, 160)))
+            index["hook_seridi"].append(r(t, 2))
+    _grid(tiles, 6, os.path.join(od, "hook_seridi.jpg"))
+    # 2) Sahneler: her sahnenin başı, ortası, sonu (görüntü başına 10 sahne)
+    bounds = sc["_bounds"]
+    per, part = [], 1
+    for n, (s, e) in enumerate(bounds):
+        for name, t in (("bas", s + 0.05), ("orta", (s + e) / 2), ("son", e - 0.1)):
+            fr = _grab(cap, t, dur, 160)
+            if fr is not None:
+                per.append(_label(fr, f"S{n + 1} {name} {tc(t)}"))
+                index["sahneler"].append({"sahne": n + 1, "konum": name, "t": r(t, 2), "dosya": f"sahneler_{part}.jpg"})
+        if (n + 1) % 10 == 0 or n == len(bounds) - 1:
+            _grid(per, 6, os.path.join(od, f"sahneler_{part}.jpg"))
+            per, part = [], part + 1
+    # 3) Olay anları: makinenin "burada bir şey oldu" dediği anlar
+    ev = [(t, "sahne_ici_olay") for t in sc["_events"]]
+    ev += [(t, "pattern_interrupt") for t in de.get("dikkat", {}).get("pattern_interrupt_zamanlari", [])]
+    ev += [(t, "yeni_ekran_yazisi") for t in (oc or {}).get("_event_times", [])]
+    ev += [(x["bas"], "kamera_" + x["tip"]) for x in (mo or {}).get("segmentler", [])]
+    ev.sort()
+    merged = []
+    for t, k in ev:      # 0,3 sn içindeki olayları birleştir
+        if merged and t - merged[-1][0] < 0.3:
+            if k not in merged[-1][1]:
+                merged[-1][1].append(k)
+        else:
+            merged.append([t, [k]])
+    if len(merged) > 72:
+        merged = [merged[int(i)] for i in np.linspace(0, len(merged) - 1, 72)]
+    tiles, part = [], 1
+    for j, (t, ks) in enumerate(merged):
+        fr = _grab(cap, t + 0.1, dur, 160)
+        if fr is not None:
+            kisa = {"sahne_ici_olay": "olay", "pattern_interrupt": "PI", "yeni_ekran_yazisi": "yazi"}
+            tiles.append(_label(fr, f"{tc(t)} " + "+".join(kisa.get(k, k.replace("kamera_", "")) for k in ks), (0, 110, 0)))
+            index["olay_anlari"].append({"t": r(t, 2), "olay": ks, "dosya": f"olay_anlari_{part}.jpg"})
+        if len(tiles) == 36 or (j == len(merged) - 1 and tiles):
+            _grid(tiles, 6, os.path.join(od, f"olay_anlari_{part}.jpg"))
+            tiles, part = [], part + 1
+    cap.release()
+    with open(os.path.join(od, "kare_dizini.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, indent=1)
+
+
 def contact_sheet(path, bounds, outfn, base, maxn=40):
     cap = cv2.VideoCapture(path)
     pick = bounds if len(bounds) <= maxn else [bounds[int(i)] for i in np.linspace(0, len(bounds) - 1, maxn)]
@@ -738,6 +824,7 @@ def analyze(src, a):
     print("[7/7] Senkron, dikkat, hook, loop")
     de = derived(base, sc, mo, au_raw, sp, words, oc, vp)
     contact_sheet(path, sc["_bounds"], os.path.join(od, "contact_sheet.jpg"), base)
+    key_frames(path, base, sc, mo, oc, de, od)
     if sp.get("_cumleler"):
         with open(os.path.join(od, "transcript.txt"), "w", encoding="utf-8") as f:
             for s in sp["_cumleler"]:
